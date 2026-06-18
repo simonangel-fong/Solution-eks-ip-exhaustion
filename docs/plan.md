@@ -1,253 +1,358 @@
-# Implementation Plan — eks-ip-exhaustion-lab
+# EKS Pod IP Exhaustion Lab
 
-Layered build plan for the lab described in [prd.md](prd.md). Each phase has a **Build** step and a **Verify** step. Infrastructure is verified with the AWS CLI; Kubernetes resources are verified with `kubectl`.
+## Problem
 
----
+As application workloads grow, increasing pod density can consume available subnet IP capacity. In Amazon EKS, IP exhaustion can cause pod scheduling failures, limit cluster scalability, and create availability risks during workload expansion.
 
-## Decisions
+> How can pod IP exhaustion in Amazon EKS be detected, analyzed, and remediated without causing downtime to existing workloads?
 
-| Topic | Decision | Source |
-|---|---|---|
-| Kubernetes version | `1.36` (GA on EKS) | [prd.md:135](prd.md#L135) |
-| State backend | Local `terraform.tfstate` | Lab scope |
-| NAT subnet placement | Split Subnet A `/25` → public `/26` + private `/26`; Subnet B stays `/25` | Resolves overlap in [prd.md:113-127](prd.md#L113-L127) |
+## Project Goal
 
-### Revised subnet layout
-
-| Subnet | CIDR | AZ | Usable IPs | Role |
-|---|---|---|---|---|
-| Public A (NAT) | `10.0.0.0/26` | `ca-central-1a` | 59 | NAT GW + IGW |
-| Private A | `10.0.0.64/26` | `ca-central-1a` | 59 | EKS nodes/pods |
-| Private B | `10.0.0.128/25` | `ca-central-1b` | 123 | EKS nodes/pods |
+- Build a reproducible EKS lab that simulates pod IP exhaustion
+- Analyze the impact on pod scheduling, networking, and application availability
+- Validate practical remediation strategies for restoring pod scheduling capacity with minimal or zero downtime
 
 ---
 
-## Phase 1 — VPC
+## Background & Context
 
-**Build**
+Amazon EKS commonly uses the Amazon VPC CNI, which assigns VPC-routable IP addresses to pods. This makes pod networking simple and AWS-native, but it also means pod capacity is directly tied to available IP addresses in the worker node subnets.
 
-- [terraform/main.tf](../terraform/main.tf): AWS provider, `ca-central-1`, local backend, `required_providers`.
-- [terraform/vpc.tf](../terraform/vpc.tf): VPC `10.0.0.0/24`, DNS hostnames + support on.
-- `terraform init`
-- `terraform plan`
-- `terraform apply`
+When subnet IP capacity is exhausted, new pods may fail to start even if the cluster still has available CPU and memory. This project intentionally uses small subnets to reproduce the failure mode, observe the symptoms, and evaluate remediation options.
 
-**Verify**
+---
 
-```bash
-aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=eks-ip-exhaustion" \
-  --query "Vpcs[].{ID:VpcId,CIDR:CidrBlock,DNS:EnableDnsSupport}"
+## Scope
+
+### In Scope
+
+- EKS worker node subnets where pod IPs are allocated
+- Amazon VPC CNI IP allocation behavior
+- Warm IP and warm ENI configuration
+- Subnet and VPC CIDR design
+- Terraform-managed AWS infrastructure
+- Helm-managed nginx workload
+- Subnet IP capacity observation using AWS CLI
+- Pod and event analysis using `kubectl`
+
+### Out of Scope
+
+- IPv6 cluster implementation
+- Service mesh overhead
+- Multi-region or disaster recovery design
+- Non-HTTP workloads
+- Fargate profiles
+- Alternative CNI implementations
+
+---
+
+## Infrastructure Specification
+
+### Network
+
+#### IP Capacity Model
+
+```text
+Total IPs in subnet
+  − 5 AWS-reserved IPs
+  − EKS control-plane ENIs
+  − worker node primary ENIs
+  − VPC CNI warm IP pool
+  − pod IP assignments
+────────────────────────────
+= IPs available for new pods
 ```
 
-Expect: 1 VPC, CIDR `10.0.0.0/24`, DNS `true`.
+> In this lab, the private subnets are intentionally small so that pod IP exhaustion can be reproduced quickly.
+
+#### VPC
+
+| Spec          | Value          |
+| ------------- | -------------- |
+| CIDR          | `10.0.0.0/26`  |
+| Total IPs     | `64`           |
+| Usable IPs    | `59`           |
+| Region        | `ca-central-1` |
+| DNS hostnames | `Enabled`      |
+| DNS support   | `Enabled`      |
+
+> A deliberately small `/26` VPC is used to make pod IP exhaustion reproducible in a short-running lab.
+
+#### Subnets
+
+| Subnet    | CIDR           | AZ              | Usable IPs | Role                                          |
+| --------- | -------------- | --------------- | ---------- | --------------------------------------------- |
+| Public A  | `10.0.0.0/28`  | `ca-central-1a` | `11`       | Internet Gateway and NAT Gateway              |
+| Private A | `10.0.0.16/28` | `ca-central-1a` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+| Private B | `10.0.0.32/28` | `ca-central-1b` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+
+> The private `/28` subnets are intentionally undersized to make IP exhaustion observable. This design is for lab simulation only and is not suitable for production EKS workloads.
+
+#### Subnet Tags
+
+| Tag                                  | Applied To      | Value   |
+| ------------------------------------ | --------------- | ------- |
+| `kubernetes.io/role/elb`             | Public subnet   | `1`     |
+| `kubernetes.io/role/internal-elb`    | Private subnets | `1`     |
+| `kubernetes.io/cluster/eks-ip-scale` | Private subnets | `owned` |
+
+#### Internet Access
+
+| Spec             | Value                                         |
+| ---------------- | --------------------------------------------- |
+| Internet Gateway | `1`, attached to the VPC                      |
+| NAT Gateway      | `1`, deployed in Public A                     |
+| NAT Elastic IP   | `1`                                           |
+| Design note      | Single NAT Gateway is used to reduce lab cost |
 
 ---
 
-## Phase 2 — Subnets, Route Tables, Networking
+### EKS Cluster
 
-**Build**
+#### Cluster
 
-- Public subnet `10.0.0.0/26` in `ca-central-1a` for NAT.
-- Private subnet `10.0.0.64/26` in `ca-central-1a` for EKS.
-- Private subnet `10.0.0.128/25` in `ca-central-1b` for EKS.
-- EKS tags (`kubernetes.io/role/internal-elb=1`, `kubernetes.io/cluster/<name>=owned`) on both private subnets.
-- IGW attached to VPC.
-- NAT GW + EIP in the public subnet.
-- Public RT (`0.0.0.0/0 → igw`), private RT (`0.0.0.0/0 → nat`), associations.
+| Spec                    | Value                         |
+| ----------------------- | ----------------------------- |
+| Cluster name            | `eks-ip-scale`                |
+| Kubernetes version      | `1.36`                        |
+| Endpoint public access  | `true`                        |
+| Endpoint private access | `true`                        |
+| Control-plane subnets   | Private A, Private B          |
+| CNI                     | Amazon VPC CNI managed add-on |
+| Cluster logs            | `api`, `scheduler`            |
 
-**Verify**
+> The cluster uses two private subnets across two Availability Zones to satisfy EKS subnet requirements and keep the lab focused on private subnet IP exhaustion.
+
+#### Managed Node Group
+
+| Spec                | Value                |
+| ------------------- | -------------------- |
+| Instance type       | `t3.medium`          |
+| Capacity type       | `ON_DEMAND`          |
+| Min / Max / Desired | `1` / `1` / `1`      |
+| Node subnets        | Private A, Private B |
+| Max pods per node   | `17`                 |
+
+> `t3.medium` is intentionally used with small private subnets to make pod IP pressure visible quickly. In this lab, pod startup may be limited by both subnet IP capacity and node-level pod density.
+
+#### VPC CNI Configuration
+
+| Environment Variable | Value | Purpose                                         |
+| -------------------- | ----- | ----------------------------------------------- |
+| `WARM_IP_TARGET`     | `1`   | Keep a minimal warm IP buffer for pod startup   |
+| `MINIMUM_IP_TARGET`  | `0`   | Avoid front-loading a larger secondary IP pool  |
+| `WARM_ENI_TARGET`    | `0`   | Avoid maintaining an additional unused warm ENI |
+
+> These values reduce unnecessary IP pre-allocation so that actual subnet capacity pressure is easier to observe.
+
+---
+
+## Workload — nginx
+
+| Spec                   | Value                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| Chart                  | `bitnami/nginx`                                                              |
+| Release name           | `web`                                                                        |
+| Initial replicas       | `1`                                                                          |
+| CPU request / limit    | `20m` / `50m`                                                                |
+| Memory request / limit | `32Mi` / `64Mi`                                                              |
+| Service type           | `ClusterIP`                                                                  |
+| Scaling method         | Increase replicas until new pods remain pending or fail during network setup |
+
+> The nginx workload is used as a lightweight test application to create pod density and trigger observable scheduling or networking failure modes.
+
+---
+
+## Terraform File Structure
+
+```txt
+eks-ip-scale/
+├── infra/
+│   ├── 01_variables.tf   # input variables
+│   ├── 02_providers.tf   # Terraform block, AWS provider, S3 backend
+│   ├── 03_locals.tf      # project name, region, CIDRs, node group sizing
+│   ├── 04_outputs.tf     # cluster endpoint, subnet IDs, kubeconfig hints
+│   ├── 05_vpc.tf         # VPC, subnets, IGW, NAT, EIP, route tables
+│   ├── 06_eks.tf         # IAM, EKS cluster, node group, VPC CNI add-on
+│   ├── backend.hcl       # S3 backend config, gitignored
+│   └── terraform.tfvars  # variable values, gitignored
+├── helm/
+│   └── nginx-values.yaml # bitnami/nginx values
+└── README.md
+```
+
+> Terraform state is stored in S3 using `terraform { backend "s3" {} }`, with backend values supplied through `backend.hcl`.
+
+---
+
+## Reproduction Phases
+
+### Phase 1: Baseline
+
+Establish the initial cluster state before scaling the workload.
+
+| Item                    | Value                          |
+| ----------------------- | ------------------------------ |
+| Node group desired size | `1`                            |
+| Initial nginx replicas  | `1`                            |
+| Observation target      | Baseline subnet IP consumption |
+
+Check available IP capacity in the private subnets:
 
 ```bash
 aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "Subnets[].{ID:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone,Free:AvailableIpAddressCount}"
-
-aws ec2 describe-nat-gateways \
-  --filter "Name=vpc-id,Values=<vpc-id>" \
-  --query "NatGateways[].{ID:NatGatewayId,State:State}"
-
-aws ec2 describe-route-tables \
-  --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "RouteTables[].{ID:RouteTableId,Routes:Routes[].DestinationCidrBlock}"
+  --subnet-ids <private-subnet-a-id> <private-subnet-b-id> \
+  --query "Subnets[*].{SubnetId:SubnetId,CIDR:CidrBlock,AvailableIPs:AvailableIpAddressCount}" \
+  --output table
 ```
 
-Expect: 3 subnets with expected CIDRs/AZs, NAT `available`, private RT has `0.0.0.0/0 → nat-...`, public RT has `0.0.0.0/0 → igw-...`.
-
----
-
-## Phase 3 — EKS Cluster + Node Group + Add-ons
-
-**Build**
-
-- [terraform/eks.tf](../terraform/eks.tf): cluster `eks-ip-exhaustion`, k8s `1.36`, IAM roles, endpoint public + private access, log types `api`, `scheduler`.
-- Node group `t3.medium`, capacity `ON_DEMAND`, min/max/desired `1/3/2`, attached to both private subnets.
-- [terraform/addons.tf](../terraform/addons.tf): VPC CNI managed addon with env vars:
-  - `WARM_IP_TARGET=5`
-  - `MINIMUM_IP_TARGET=3`
-  - `WARM_ENI_TARGET=1`
-- `aws eks update-kubeconfig --region ca-central-1 --name eks-ip-exhaustion`
-
-**Verify**
+Check initial pod placement:
 
 ```bash
-aws eks describe-cluster --name eks-ip-exhaustion \
-  --query "cluster.{Status:status,Version:version,Endpoint:endpoint}"
-
-aws eks describe-nodegroup \
-  --cluster-name eks-ip-exhaustion --nodegroup-name <ng> \
-  --query "nodegroup.{Status:status,Scaling:scalingConfig}"
-
-aws eks describe-addon \
-  --cluster-name eks-ip-exhaustion --addon-name vpc-cni \
-  --query "addon.{Status:status,Version:addonVersion}"
-
 kubectl get nodes -o wide
-kubectl -n kube-system get ds aws-node
-kubectl -n kube-system get ds aws-node \
-  -o jsonpath='{.spec.template.spec.containers[0].env}' | jq
+kubectl get pods -o wide
+kubectl get events --sort-by=.lastTimestamp
 ```
 
-Expect: cluster `ACTIVE`, node group `ACTIVE`, addon `ACTIVE`, 2 Ready nodes, `aws-node` env shows the configured warm-pool values.
+> This phase confirms the starting IP capacity after EKS control-plane ENIs, worker node ENIs, VPC CNI warm IPs, system pods, and the initial nginx workload are running.
 
 ---
 
-## Phase 4 — Workload (Single Pod)
+### Phase 2: IP Exhaustion
 
-**Build**
+Scale the nginx workload beyond the available pod IP capacity of the private subnets.
 
-- [helm/nginx-values.yaml](../helm/nginx-values.yaml): bitnami/nginx, `replicaCount: 1`, CPU `100m`/`200m`, memory `64Mi`/`128Mi`, service `ClusterIP`.
-- `helm repo add bitnami https://charts.bitnami.com/bitnami`
-- `helm install nginx-lab bitnami/nginx -f helm/nginx-values.yaml`
+| Item               | Value                                           |
+| ------------------ | ----------------------------------------------- |
+| Scaling method     | `helm upgrade`                                  |
+| Target replicas    | `200`                                           |
+| Expected limit     | Private subnet IP capacity and node pod density |
+| Expected pod state | `Pending` or `ContainerCreating`                |
 
-**Verify**
+Scale the workload:
+
+```bash
+helm upgrade web bitnami/nginx \
+  --set replicaCount=200
+```
+
+Observe pod status:
 
 ```bash
 kubectl get pods -o wide
-kubectl get svc nginx-lab
-kubectl describe pod -l app.kubernetes.io/name=nginx | grep -E "IP:|Node:"
+kubectl describe deploy web-nginx
+kubectl get events --sort-by=.lastTimestamp
+```
 
+Check for pod sandbox or CNI-related failures:
+
+```bash
+kubectl get events \
+  --field-selector reason=FailedCreatePodSandBox \
+  --sort-by=.lastTimestamp
+```
+
+Check remaining subnet IP capacity:
+
+```bash
 aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "Subnets[].{CIDR:CidrBlock,Free:AvailableIpAddressCount}"
+  --subnet-ids <private-subnet-a-id> <private-subnet-b-id> \
+  --query "Subnets[*].{SubnetId:SubnetId,CIDR:CidrBlock,AvailableIPs:AvailableIpAddressCount}" \
+  --output table
 ```
 
-Expect: 1 pod `Running` with a VPC IP, baseline `AvailableIpAddressCount` recorded for both private subnets.
+> Expected result: new pods fail to start because the cluster cannot allocate enough pod networking capacity from the private subnets. This demonstrates subnet IP exhaustion as a scaling bottleneck, even when CPU and memory may still be available.
 
 ---
 
-## Phase 5 — Scale Out + HPA
+## Solution Strategy
 
-**Build**
+This project separates solution options into two categories:
 
-- `kubectl scale deploy/nginx-lab --replicas=2` and confirm both pods schedule.
-- [k8s/hpa.yaml](../k8s/hpa.yaml): min `2`, max `80`, CPU target `20%`, scale-up stabilization `0s`, scale-down `30s`.
-- `kubectl apply -f k8s/hpa.yaml`
-
-**Verify**
-
-```bash
-kubectl get deploy nginx-lab
-kubectl get hpa nginx-lab
-kubectl top pods
-```
-
-Expect: 2 pods `Running`, HPA shows `<n>%/20%` (not `<unknown>`), metrics-server reachable.
+- **Mitigation actions**: steps that can be applied to an existing EKS cluster to recover from or reduce pod IP exhaustion.
+- **Bootstrap best practices**: design decisions that should be considered when creating new EKS clusters to prevent future IP exhaustion.
 
 ---
 
-## Phase 6 — Exhaust + Observe
+## Mitigation Actions for Existing Clusters
 
-**Build**
+| ID  | Solution                              | Description                                                                                                                                            | When to Use             |
+| --- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| M1  | Validate Warm Pool Settings           | Review `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_ENI_TARGET` to confirm that IPs are not being over-reserved by the VPC CNI.                    | Immediate investigation |
+| M2  | Enhanced Subnet Discovery             | Add new subnets in the same Availability Zones, tag them with `kubernetes.io/role/cni=1`, and allow the VPC CNI to use the additional subnet capacity. | Short-term expansion    |
+| M3  | Prefix Delegation                     | Enable `ENABLE_PREFIX_DELEGATION` so the VPC CNI assigns `/28` IPv4 prefixes to ENIs, improving pod density per node.                                  | Density improvement     |
+| M4  | Custom Networking with Secondary CIDR | Add a secondary VPC CIDR and use `ENIConfig` so pod IPs are allocated from dedicated pod subnets instead of the node subnets.                          | Structural remediation  |
 
-- Load generator:
-  ```bash
-  kubectl run loadgen --image=busybox --restart=Never -- \
-    /bin/sh -c "while true; do wget -q -O- http://nginx-lab; done"
-  ```
-  (or a `k6` Job).
+### Recommended Mitigation Path
 
-**Verify**
+```text
+Immediate   → M1  Validate Warm Pool Settings
+              Confirm whether IPs are being wasted through CNI pre-allocation.
+
+Short-term  → M2  Enhanced Subnet Discovery
+              Add private subnet capacity without replacing existing workloads.
+
+Medium-term → M4 + M3  Custom Networking + Prefix Delegation
+              Move pod IP allocation to dedicated pod subnets and improve pod density.
+```
+
+> For this project, the primary remediation path is **M1 → M2 → M4 + M3**. Warm pool tuning is used as an initial validation step, while subnet expansion and custom networking provide the real capacity improvement.
+
+---
+
+## Expected Remediation Validation
+
+After applying a mitigation, validate that pod scheduling capacity has recovered.
+
+| Validation Area          | Command / Signal                                                       |
+| ------------------------ | ---------------------------------------------------------------------- |
+| Subnet IP capacity       | `AvailableIpAddressCount` increases or stops reaching zero             |
+| Pod scheduling           | New nginx pods move from `Pending` or `ContainerCreating` to `Running` |
+| Kubernetes events        | CNI or pod sandbox creation failures stop appearing                    |
+| Application availability | Existing nginx pods remain available during remediation                |
+| Cluster stability        | No node replacement is required for short-term mitigation              |
+
+Example validation commands:
 
 ```bash
-kubectl get hpa nginx-lab -w
 kubectl get pods -o wide
-kubectl get events --field-selector reason=FailedCreatePodSandBox \
+
+kubectl get events \
   --sort-by=.lastTimestamp
 
 aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "Subnets[].{CIDR:CidrBlock,Free:AvailableIpAddressCount}"
-
-kubectl -n kube-system logs ds/aws-node \
-  | grep -iE "InsufficientFreeAddresses|failed to allocate"
+  --subnet-ids <private-subnet-a-id> <private-subnet-b-id> \
+  --query "Subnets[*].{SubnetId:SubnetId,CIDR:CidrBlock,AvailableIPs:AvailableIpAddressCount}" \
+  --output table
 ```
 
-Expect: pods in `Pending`, `FailedCreatePodSandBox` events present, `AvailableIpAddressCount` near `0`. Save all output to `docs/evidence/baseline/`.
+> A successful remediation should restore pod scheduling capacity without disrupting existing running pods.
 
 ---
 
-## Phase 7 — Solutions (one branch per ID)
+## EKS Bootstrap Best Practices
 
-For each solution: create a branch, apply the change, redeploy, repeat the Phase 6 verification, save evidence to `docs/evidence/<solution>/`, and fill the §9 trade-off table from the PRD.
+| ID  | Best Practice                  | Description                                                                                                    | Why It Matters                                    |
+| --- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| B1  | Plan Larger Pod Subnets        | Use sufficiently large private subnets for worker nodes and pods instead of undersized `/28` lab subnets.      | Prevents early subnet IP exhaustion               |
+| B2  | Use Separate Pod Address Space | Attach a secondary VPC CIDR and allocate pod IPs from dedicated pod subnets when high pod density is expected. | Separates node IP and pod IP consumption          |
+| B3  | Enable Prefix Delegation Early | Enable prefix delegation when creating the cluster or node groups to improve pod density per node.             | Reduces ENI/IP allocation pressure                |
+| B4  | Consider IPv6 for New Clusters | Create IPv6 EKS clusters for workloads where IPv4 address space is a long-term constraint.                     | Avoids private IPv4 exhaustion for pod networking |
+| B5  | Monitor Subnet IP Capacity     | Track `AvailableIpAddressCount`, VPC CNI metrics, and pod scheduling failures.                                 | Detects exhaustion before workloads are impacted  |
 
-### 7a — `solution/s1-warm-pool`
-
-**Build:** set VPC CNI env `WARM_IP_TARGET=1`, `WARM_ENI_TARGET=0` (addon update).
-
-**Verify:**
-```bash
-kubectl -n kube-system get ds aws-node \
-  -o jsonpath='{.spec.template.spec.containers[0].env}' | jq
-aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "Subnets[].{CIDR:CidrBlock,Free:AvailableIpAddressCount}"
-```
-Expect: new env values applied, more free IPs at idle, HPA can scale further before exhaustion.
-
-### 7b — `solution/s4-subnet-discovery`
-
-**Build:** add a new private subnet tagged `kubernetes.io/role/cni=1`, no workload changes.
-
-**Verify:**
-```bash
-aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "Subnets[].{ID:SubnetId,CIDR:CidrBlock,Tags:Tags}"
-kubectl -n kube-system logs ds/aws-node | grep -i discovered
-```
-Expect: new subnet visible, CNI logs reference discovery, new ENIs land in the new subnet under load.
-
-### 7c — `solution/s3-s2-custom-net-pd`
-
-**Build:** attach secondary VPC CIDR `100.64.0.0/16`, create per-AZ `ENIConfig`, set `AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG=true` and `ENABLE_PREFIX_DELEGATION=true`.
-
-**Verify:**
-```bash
-aws ec2 describe-vpcs --vpc-ids <vpc-id> \
-  --query "Vpcs[].CidrBlockAssociationSet"
-kubectl get eniconfig
-aws ec2 describe-network-interfaces \
-  --filters "Name=vpc-id,Values=<vpc-id>" \
-  --query "NetworkInterfaces[].{ID:NetworkInterfaceId,Subnet:SubnetId,Prefixes:Ipv4Prefixes}"
-kubectl get pods -o wide
-```
-Expect: secondary CIDR attached, ENIConfigs present, ENIs hold `/28` prefixes, pod IPs come from `100.64.0.0/16`.
+> These best practices are most effective when applied during cluster design. They are not all suitable as emergency fixes for a running cluster.
 
 ---
 
-## Phase 8 — Documentation
+## Success Criteria
 
-**Build**
+The project is successful when it demonstrates the full operational flow:
 
-- [README.md](../README.md): quickstart, teardown, cost note (NAT GW ≈ $0.045/h).
-- `docs/results.md`: consolidated trade-off table across the §9 dimensions (cost, complexity, downtime risk, IP efficiency, AWS supportability, scalability ceiling).
-- Teardown: `helm uninstall`, `kubectl delete -f k8s/`, `terraform destroy`.
-
-**Verify**
-
-```bash
-aws ec2 describe-addresses --query "Addresses[?AssociationId==null]"
-aws ec2 describe-nat-gateways --filter "Name=state,Values=available"
-aws eks list-clusters
+```text
+Baseline observed
+→ IP exhaustion reproduced
+→ failure mode identified through events and subnet IP metrics
+→ mitigation applied
+→ pod scheduling capacity restored
+→ existing workloads remain available
 ```
-
-Expect: no orphan EIPs, no live NAT gateways, no remaining EKS clusters.

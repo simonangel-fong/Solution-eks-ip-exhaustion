@@ -1,0 +1,4 @@
+name_prefix = "gitops-vm"
+aws_profile = "gitops-vm"
+region      = "ca-central-1"
+admin_cidr  = "203.0.113.45/32" # your workstation public IP

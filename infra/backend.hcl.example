@@ -1,0 +1,4 @@
+bucket  = "your-tfstate-bucket-name"
+key     = "eks-ip-exhaustion/terraform.tfstate"
+region  = "ca-central-1"
+encrypt = true
