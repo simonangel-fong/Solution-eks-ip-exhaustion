@@ -114,9 +114,9 @@ resource "aws_eks_addon" "vpc_cni" {
 
   configuration_values = jsonencode({
     env = {
-      WARM_IP_TARGET    = "5"
-      MINIMUM_IP_TARGET = "3"
-      WARM_ENI_TARGET   = "1"
+      WARM_IP_TARGET    = "1"
+      MINIMUM_IP_TARGET = "0"
+      WARM_ENI_TARGET   = "0"
     }
   })
 

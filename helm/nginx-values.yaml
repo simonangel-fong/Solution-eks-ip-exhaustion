@@ -1,4 +1,4 @@
-replicaCount: 200
+replicaCount: 2
 
 service:
   type: ClusterIP

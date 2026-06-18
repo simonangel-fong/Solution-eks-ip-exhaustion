@@ -129,7 +129,7 @@ Total IPs in subnet
 | ------------------- | -------------------- |
 | Instance type       | `t3.medium`          |
 | Capacity type       | `ON_DEMAND`          |
-| Min / Max / Desired | `1` / `1` / `1`      |
+| Min / Max / Desired | `1` / `2` / `4`      |
 | Node subnets        | Private A, Private B |
 | Max pods per node   | `17`                 |
 

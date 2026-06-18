@@ -1,131 +1,98 @@
+## Create EKS
+
 ```sh
 terraform -chdir=infra init --backend-config=backend.hcl -reconfigure
 terraform -chdir=infra fmt
 terraform -chdir=infra validate
 terraform -chdir=infra apply -auto-approve
 
-aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-ip-exhaustion" --query "Vpcs[].{ID:VpcId,CIDR:CidrBlock,DNS:EnableDnsSupport}"
-# [
-#     {
-#         "ID": "vpc-07c4568b48b3c2a59",
-#         "CIDR": "10.0.0.0/24",
-#         "DNS": null
-#     }
-# ]
-
-# confirm subnet
-aws ec2 describe-subnets --filters "Name=vpc-id,Values=vpc-07c4568b48b3c2a59" --query "Subnets[].{ID:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone,Free:AvailableIpAddressCount}"
-# [
-#     {
-#         "ID": "subnet-02b1c63fcba358f15",
-#         "CIDR": "10.0.0.0/28",
-#         "AZ": "ca-central-1a",
-#         "Free": 10
-#     },
-#     {
-#         "ID": "subnet-06c7bee4e732f6939",
-#         "CIDR": "10.0.0.32/28",
-#         "AZ": "ca-central-1b",
-#         "Free": 0
-#     },
-#     {
-#         "ID": "subnet-086f4fe3d9fb2798e",
-#         "CIDR": "10.0.0.16/28",
-#         "AZ": "ca-central-1a",
-#         "Free": 0
-#     }
-# ]
-
-aws eks describe-cluster --name eks-ip-exhaustion --query "cluster.{Status:status,Version:version,Endpoint:endpoint}"
-# {
-#     "Status": "ACTIVE",
-#     "Version": "1.36",
-#     "Endpoint": "https://9F7B5448B8A39D855BE3AC2B2C3C66ED.sk1.ca-central-1.eks.amazonaws.com"
-# }
-
-aws eks describe-nodegroup --cluster-name eks-ip-exhaustion --nodegroup-name eks-ip-exhaustion-ng --query "nodegroup.{Status:status,Scaling:scalingConfig}"
-# {
-#     "Status": "ACTIVE",
-#     "Scaling": {
-#         "minSize": 1,
-#         "maxSize": 10,
-#         "desiredSize": 10
-#     }
-# }
-
-aws eks describe-addon --cluster-name eks-ip-exhaustion --addon-name vpc-cni --query "addon.{Status:status,Version:addonVersion}"
-# {
-#     "Status": "ACTIVE",
-#     "Version": "v1.22.2-eksbuild.1"
-# }
-
-aws eks update-kubeconfig --region ca-central-1 --name eks-ip-exhaustion
-# Updated context arn:aws:eks:ca-central-1:099139718958:cluster/eks-ip-exhaustion in /home/ubuntuadmin/.kube/config
+aws eks update-kubeconfig --region ca-central-1 --name eks-ip-scale
+# Added new context arn:aws:eks:ca-central-1:099139718958:cluster/eks-ip-scale to /home/ubuntuadmin/.kube/config
 
 kubectl get nodes -o wide
-# NAME                                          STATUS   ROLES    AGE   VERSION               INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                           CONTAINER-RUNTIME
-# ip-10-0-0-149.ca-central-1.compute.internal   Ready    <none>   14m   v1.36.1-eks-0de9cde   10.0.0.149    <none>        Amazon Linux 2023.12.20260608   6.18.33-63.124.amzn2023.x86_64 (amd64)   containerd://2.2.4+unknown
-# ip-10-0-0-73.ca-central-1.compute.internal    Ready    <none>   14m   v1.36.1-eks-0de9cde   10.0.0.73     <none>        Amazon Linux 2023.12.20260608   6.18.33-63.124.amzn2023.x86_64 (amd64)   containerd://2.2.4+unknown
+# NAME                                         STATUS   ROLES    AGE     VERSION               INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                           CONTAINER-RUNTIME
+# ip-10-0-0-25.ca-central-1.compute.internal   Ready    <none>   30m     v1.36.1-eks-0de9cde   10.0.0.25     <none>        Amazon Linux 2023.12.20260608   6.18.33-63.124.amzn2023.x86_64 (amd64)   containerd://2.2.4+unknown
+# ip-10-0-0-37.ca-central-1.compute.internal   Ready    <none>   6m51s   v1.36.1-eks-0de9cde   10.0.0.37     <none>        Amazon Linux 2023.12.20260608   6.18.33-63.124.amzn2023.x86_64 (amd64)   containerd://2.2.4+unknown
 
-kubectl -n kube-system get ds aws-node
-# NAME       DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-# aws-node   2         2         2       2            2           <none>          5m44s
+kubectl get pods -o wide -A
+# NAMESPACE     NAME                       READY   STATUS    RESTARTS   AGE     IP          NODE                                         NOMINATED NODE   READINESS GATES
+# kube-system   aws-node-2t68b             2/2     Running   0          7m21s   10.0.0.37   ip-10-0-0-37.ca-central-1.compute.internal   <none>           <none>
+# kube-system   aws-node-66th7             2/2     Running   0          30m     10.0.0.25   ip-10-0-0-25.ca-central-1.compute.internal   <none>           <none>
+# kube-system   coredns-84994d84c5-4zbjd   1/1     Running   0          33m     10.0.0.24   ip-10-0-0-25.ca-central-1.compute.internal   <none>           <none>
+# kube-system   coredns-84994d84c5-84xj4   1/1     Running   0          33m     10.0.0.23   ip-10-0-0-25.ca-central-1.compute.internal   <none>           <none>
+# kube-system   kube-proxy-jsp7x           1/1     Running   0          7m21s   10.0.0.37   ip-10-0-0-37.ca-central-1.compute.internal   <none>           <none>
+# kube-system   kube-proxy-rdf92           1/1     Running   0          30m     10.0.0.25   ip-10-0-0-25.ca-central-1.compute.internal   <none>           <none>
 
+aws ec2 describe-subnets \
+  --subnet-ids subnet-036659f9d08cf5913 subnet-06a54a19a9cd65165 \
+  --query "Subnets[*].{SubnetId:SubnetId,CIDR:CidrBlock,AvailableIPs:AvailableIpAddressCount}" \
+  --output table
 
-# install metric server
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+# --------------------------------------------------------------
+# |                       DescribeSubnets                      |
+# +--------------+----------------+----------------------------+
+# | AvailableIPs |     CIDR       |         SubnetId           |
+# +--------------+----------------+----------------------------+
+# |  7           |  10.0.0.32/28  |  subnet-036659f9d08cf5913  |
+# |  5           |  10.0.0.16/28  |  subnet-06a54a19a9cd65165  |
+# +--------------+----------------+----------------------------+
+```
 
-k get deploy metrics-server -n kube-system
-# NAME             READY   UP-TO-DATE   AVAILABLE   AGE
-# metrics-server   1/1     1            1           74s
+| Subnet                 | Total usable | Consumed | AvailableIPs |
+| ---------------------- | ------------ | -------- | ------------ |
+| Private A 10.0.0.16/28 | 16           | 11       | 5            |
+| Private B 10.0.0.32/28 | 16           | 9        | 7            |
 
-# Deploy
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
-helm upgrade -i web-app bitnami/nginx -f helm/nginx-values.yaml
+---
 
-kubectl get pods -o wide
-# NAME                             READY   STATUS    RESTARTS   AGE     IP           NODE                                          NOMINATED NODE   READINESS GATES
-# web-app-nginx-8449d77c8d-kmvj6   1/1     Running   0          12s     10.0.0.187   ip-10-0-0-149.ca-central-1.compute.internal   <none>           <none>
-# web-app-nginx-8449d77c8d-qprlv   1/1     Running   0          8m52s   10.0.0.109   ip-10-0-0-73.ca-central-1.compute.internal    <none>           <none>
+## IP Exhaustion
 
-kubectl top pods
-# NAME                             CPU(cores)   MEMORY(bytes)
-# web-app-nginx-8449d77c8d-kmvj6   1m           4Mi
-# web-app-nginx-8449d77c8d-qprlv   1m           4Mi
+```bash
+kubectl create deploy web --image=nginx --replicas=0
+# deployment.apps/web created
 
-kubectl get svc web-app-nginx
-# NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
-# web-app-nginx   ClusterIP   172.20.227.29   <none>        80/TCP,443/TCP   68s
+kubectl scale deploy web --replicas=20
+# deployment.apps/web scaled
 
-aws ec2 describe-subnets --filters "Name=vpc-id,Values=vpc-07c4568b48b3c2a59" --query "Subnets[].{CIDR:CidrBlock,Free:AvailableIpAddressCount}"
-# [
-#     {
-#         "ID": "subnet-02b1c63fcba358f15",
-#         "CIDR": "10.0.0.0/28",
-#         "AZ": "ca-central-1a",
-#         "Free": 10
-#     },
-#     {
-#         "ID": "subnet-06c7bee4e732f6939",
-#         "CIDR": "10.0.0.32/28",
-#         "AZ": "ca-central-1b",
-#         "Free": 3
-#     },
-#     {
-#         "ID": "subnet-086f4fe3d9fb2798e",
-#         "CIDR": "10.0.0.16/28",
-#         "AZ": "ca-central-1a",
-#         "Free": 3
-#     }
-# ]
+kubectl get deploy
+# NAME   READY   UP-TO-DATE   AVAILABLE   AGE
+# web    14/20   20           14          22m
+
+aws ec2 describe-subnets \
+  --subnet-ids subnet-036659f9d08cf5913 subnet-06a54a19a9cd65165 \
+  --query "Subnets[*].{SubnetId:SubnetId,CIDR:CidrBlock,AvailableIPs:AvailableIpAddressCount}" \
+  --output table
+
+# --------------------------------------------------------------
+# |                       DescribeSubnets                      |
+# +--------------+----------------+----------------------------+
+# | AvailableIPs |     CIDR       |         SubnetId           |
+# +--------------+----------------+----------------------------+
+# |  0           |  10.0.0.32/28  |  subnet-036659f9d08cf5913  |
+# |  0           |  10.0.0.16/28  |  subnet-06a54a19a9cd65165  |
+# +--------------+----------------+----------------------------+
+
+kubectl get po -l app=web | grep ContainerCreating
+# web-7887448d46-jkt5b   0/1     ContainerCreating   0          7m9s
+# web-7887448d46-llbkp   0/1     ContainerCreating   0          7m9s
+# web-7887448d46-nq7ft   0/1     ContainerCreating   0          7m9s
+# web-7887448d46-pj4kp   0/1     ContainerCreating   0          7m9s
+# web-7887448d46-q2knn   0/1     ContainerCreating   0          7m9s
+# web-7887448d46-zwv6v   0/1     ContainerCreating   0          7m9s
+
+kubectl describe po web-7887448d46-jkt5b
+# Events:
+#   Type     Reason                  Age                     From               Message
+#   ----     ------                  ----                    ----               -------
+#   Normal   Scheduled               7m34s                   default-scheduler  Successfully assigned default/web-7887448d46-jkt5b to ip-10-0-0-25.ca-central-1.compute.internal
+#   Warning  FailedCreatePodSandBox  7m34s                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "b203fc823d7cc19aa03ce8e8c1cbc21d76aadd3851c80e9d3e523cc22c407cdc": plugin type="aws-cni" name="aws-cni" failed (add): add cmd: failed to assign an IP address to container
+#   Warning  FailedCreatePodSandBox  2m20s (x17 over 5m42s)  kubelet            (combined from similar events): Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "c66900431caccf405c46f86a688a03a2a67df6c0329f9d2034ae7174b2bf2056": plugin type="aws-cni" name="aws-cni" failed (add): add cmd: failed to assign an IP address to container
 
 ```
 
-| Subnet                 | Total usable | Consumed | Free |
-| ---------------------- | ------------ | -------- | ---- |
-| Public A 10.0.0.0/28   | 16           | 6        | 10   |
-| Private B 10.0.0.16/28 | 16           | 13       | 3    |
-| Private A 10.0.0.32/28 | 16           | 13       | 3    |
-
----
+- Observation:
+  - Each pod in EKS with the AWS VPC CNI requires a VPC IP from the worker node subnets.
+  - Both private subnets reached `AvailableIpAddressCount = 0`.
+  - The deployment reached only `14/20` available replicas.
+  - The remaining pods stayed in `ContainerCreating` because the AWS CNI failed to assign pod IPs.
+  - The events confirm the root cause: `failed to assign an IP address to container`.
