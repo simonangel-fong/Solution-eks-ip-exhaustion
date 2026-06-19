@@ -69,9 +69,9 @@ Total IPs in subnet
 
 | Spec          | Value          |
 | ------------- | -------------- |
-| CIDR          | `10.0.0.0/26`  |
-| Total IPs     | `64`           |
-| Usable IPs    | `59`           |
+| CIDR          | `10.0.0.0/24`  |
+| Total IPs     | `256`          |
+| Usable IPs    | `251`          |
 | Region        | `ca-central-1` |
 | DNS hostnames | `Enabled`      |
 | DNS support   | `Enabled`      |
@@ -80,11 +80,13 @@ Total IPs in subnet
 
 #### Subnets
 
-| Subnet    | CIDR           | AZ              | Usable IPs | Role                                          |
-| --------- | -------------- | --------------- | ---------- | --------------------------------------------- |
-| Public A  | `10.0.0.0/28`  | `ca-central-1a` | `11`       | Internet Gateway and NAT Gateway              |
-| Private A | `10.0.0.16/28` | `ca-central-1a` | `11`       | EKS control-plane ENI, worker nodes, and pods |
-| Private B | `10.0.0.32/28` | `ca-central-1b` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+| Subnet        | CIDR           | AZ              | Usable IPs | Role                                          |
+| ------------- | -------------- | --------------- | ---------- | --------------------------------------------- |
+| Public A      | `10.0.0.0/28`  | `ca-central-1a` | `11`       | Internet Gateway and NAT Gateway              |
+| Private A     | `10.0.0.16/28` | `ca-central-1a` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+| Private B     | `10.0.0.32/28` | `ca-central-1b` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+| Private CNI A | `10.0.0.48/28` | `ca-central-1a` | `11`       | EKS control-plane ENI, worker nodes, and pods |
+| Private CNI B | `10.0.0.64/28` | `ca-central-1b` | `11`       | EKS control-plane ENI, worker nodes, and pods |
 
 > The private `/28` subnets are intentionally undersized to make IP exhaustion observable. This design is for lab simulation only and is not suitable for production EKS workloads.
 
@@ -276,24 +278,15 @@ This project separates solution options into two categories:
 
 ## Mitigation Actions for Existing Clusters
 
-| ID  | Solution                              | Description                                                                                                                                            | When to Use             |
-| --- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| M1  | Validate Warm Pool Settings           | Review `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_ENI_TARGET` to confirm that IPs are not being over-reserved by the VPC CNI.                    | Immediate investigation |
-| M2  | Enhanced Subnet Discovery             | Add new subnets in the same Availability Zones, tag them with `kubernetes.io/role/cni=1`, and allow the VPC CNI to use the additional subnet capacity. | Short-term expansion    |
-| M3  | Prefix Delegation                     | Enable `ENABLE_PREFIX_DELEGATION` so the VPC CNI assigns `/28` IPv4 prefixes to ENIs, improving pod density per node.                                  | Density improvement     |
-| M4  | Custom Networking with Secondary CIDR | Add a secondary VPC CIDR and use `ENIConfig` so pod IPs are allocated from dedicated pod subnets instead of the node subnets.                          | Structural remediation  |
+| ID  | Solution                  | Description                                                                                                                                            | When to Use          |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
+| M2  | Enhanced Subnet Discovery | Add new subnets in the same Availability Zones, tag them with `kubernetes.io/role/cni=1`, and allow the VPC CNI to use the additional subnet capacity. | Short-term expansion |
 
 ### Recommended Mitigation Path
 
 ```text
-Immediate   → M1  Validate Warm Pool Settings
-              Confirm whether IPs are being wasted through CNI pre-allocation.
-
 Short-term  → M2  Enhanced Subnet Discovery
               Add private subnet capacity without replacing existing workloads.
-
-Medium-term → M4 + M3  Custom Networking + Prefix Delegation
-              Move pod IP allocation to dedicated pod subnets and improve pod density.
 ```
 
 > For this project, the primary remediation path is **M1 → M2 → M4 + M3**. Warm pool tuning is used as an initial validation step, while subnet expansion and custom networking provide the real capacity improvement.
