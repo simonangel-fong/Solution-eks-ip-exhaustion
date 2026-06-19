@@ -1,3 +1,5 @@
+# providers.tf
+
 # ##############################
 # Version
 # ##############################
@@ -11,6 +13,7 @@ terraform {
     }
   }
 
+  # remote state
   backend "s3" {}
 }
 

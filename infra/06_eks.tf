@@ -61,8 +61,8 @@ resource "aws_iam_role_policy_attachment" "node_AmazonEC2ContainerRegistryReadOn
 # ##############################
 resource "aws_eks_cluster" "main" {
   name     = local.project_name
-  role_arn = aws_iam_role.cluster.arn
   version  = "1.36"
+  role_arn = aws_iam_role.cluster.arn
 
   vpc_config {
     subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]

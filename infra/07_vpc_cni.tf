@@ -1,4 +1,4 @@
-
+# vpc_cni.tf
 locals {
   vpc_secondary_cidr = "10.1.0.0/16"
   cni_a_cidr         = "10.1.0.0/18"
@@ -6,13 +6,16 @@ locals {
 }
 
 # ##############################
-# Mitigation: Additional Subnet
+# VPC: cidr association
 # ##############################
 resource "aws_vpc_ipv4_cidr_block_association" "secondary" {
   vpc_id     = aws_vpc.main.id
   cidr_block = local.vpc_secondary_cidr
 }
 
+# ##############################
+# Subnet: Additional
+# ##############################
 resource "aws_subnet" "cni_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = local.cni_a_cidr

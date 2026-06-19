@@ -1,13 +1,5 @@
-# # outputs.tf
+# outputs.tf
 
-# output "pod_subnet_a_id" {
-#   value = aws_subnet.pod_a.id
-# }
-
-# output "pod_subnet_b_id" {
-#   value = aws_subnet.pod_b.id
-# }
-
-# output "cluster_security_group_id" {
-#   value = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
-# }
+output "update_kube_config" {
+  value = "aws eks update-kubeconfig --region ca-central-1 --name ${local.project_name}"
+}

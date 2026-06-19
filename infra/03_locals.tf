@@ -1,3 +1,5 @@
+# locals.tf
+
 locals {
   project_name = "eks-ip-scale"
   aws_region   = "ca-central-1"
